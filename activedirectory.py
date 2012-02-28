@@ -28,10 +28,39 @@ class activedirectory:
 		except Exception, e:
 			return None
 
+	def user_set_pwd(self, user, old_pwd, new_pwd):
+		# Change user's account using their own creds.
+		# This forces adherence to length/complexity/history.
+		print "hi"
+
+	def priv_set_pwd(self, user, new_pwd):
+		# Change the user's password using priv'd
+		# Make sure user exists
+		status = self.priv_get_user_status(user)
+		if not status:
+			print "Could not load status for",user,"are you sure they are real?"
+			return None
+		user_dn = status['user_dn']
+		# Do not change an already priv'd user's password!
+		if self.is_admin(user_dn):
+			print user_dn,"is an admin! I'm not changing their password!"
+			return None
+		# Even priv'd user must respect min password length.
+		if not len(new_pwd) >= status['acct_pwd_policy']['pwd_length_min']:
+			print "Password must be longer than" , status['acct_pwd_policy']['pwd_length_min']
+			return None
+		new_pwd = unicode('\"' + new_pwd + '\"', "iso-8859-1").encode("utf-16-le")
+		pass_mod = [((ldap.MOD_REPLACE, "unicodePwd", [new_pwd]))]
+		try:
+			self.conn.modify_s(user_dn, pass_mod)
+		except Exception, e:
+			raise e
+		return 1
+
 	def priv_get_user_status(self, user):
 		user_base = "CN=Users," + self.base
 		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf']
-		user_status = {'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_auth':''}
+		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_auth':''}
 		if not self.conn or not self.priv:
 			return None
 		# todo: sanitize user string
@@ -47,6 +76,7 @@ class activedirectory:
 		user_attribs = result[1]
 		uac = int(user_attribs['userAccountControl'][0])
 		s = user_status
+		s['user_dn'] = user_dn
 		s['acct_locked'] = (1 if (uac & 0x00000010) else 0)
 		s['acct_disabled'] = (1 if (uac & 0x00000002) else 0)
 		s['acct_expiry'] = self.ad_time_to_unix(user_attribs['accountExpires'][0])
@@ -134,6 +164,9 @@ class activedirectory:
 				return 1
 			for group in results[0][1]['memberOf']:
 					admin |= self.is_admin(group)
+					# Break early once we detect admin
+					if admin:
+						return admin
 		except Exception, e:
 			raise e
 		return admin
@@ -149,4 +182,4 @@ class activedirectory:
 
 	def ad_time_to_unix(self, ad_time):
 		ad_seconds = self.ad_time_to_seconds(ad_time)
-		return self.ad_seconds_to_unix(ad_seconds)
+		return -self.ad_seconds_to_unix(ad_seconds)
