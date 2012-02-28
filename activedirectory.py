@@ -21,9 +21,7 @@ class activedirectory:
 		try:
 			self.conn = ldap.initialize(uri)
 			self.conn.simple_bind_s(bind_dn, bind_pw)
-			# We are now bound. Detect if we are priv'd (memberOf CN=Administrators,CN=Builtin,base)
-			results = self.conn.search_s(bind_dn, ldap.SCOPE_BASE, '(memberOf=*)', ['memberOf'])
-			if not results or not results[0] or not results[0][1] or ("CN=Administrators,CN=Builtin,"+base).lower() not in [g.lower() for g in results[0][1]['memberOf']]:
+			if not self.is_admin(bind_dn):
 				self.priv = 0
 			else:
 				self.priv = 1
@@ -122,6 +120,23 @@ class activedirectory:
 		pw_policy['pwd_lockout_threshold'] = int(pw_policy['pwd_lockout_threshold'])
 		pw_policy['pwd_policy_priority'] = int(pw_policy['pwd_policy_priority'])
 		return pw_policy
+
+	def is_admin(self, search_dn, admin = 0):
+		# Recursively look at what groups search_dn is a member of.
+		# If we find a search_dn is a member of the builtin Administrators group, return true.
+		if not self.conn:
+			return None
+		try:
+			results = self.conn.search_s(search_dn, ldap.SCOPE_BASE, '(memberOf=*)', ['memberOf'])
+			if not results:
+				return 0
+			if ("CN=Administrators,CN=Builtin,"+self.base).lower() in [g.lower() for g in results[0][1]['memberOf']]:
+				return 1
+			for group in results[0][1]['memberOf']:
+					admin |= self.is_admin(group)
+		except Exception, e:
+			raise e
+		return admin
 
     # AD's date format is 100 nanosecond intervals since Jan 1 1601 in UTC.
     # To convert to seconds, divide by 10000000.
