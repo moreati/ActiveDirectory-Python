@@ -3,12 +3,12 @@ import ldap
 
 # Internal Dependencies
 import datetime
+import re
 
 class activedirectory:
 
 	domain_pw_policy = {}
 	granular_pw_policy = {} # keys are DNs policy applies to
-	priv = 0 # set to 1 if bind_dn is member of Administrators
 
 	def __init__(self, uri, base, bind_dn, bind_pw):
 		ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, 0)
@@ -22,26 +22,57 @@ class activedirectory:
 			self.conn = ldap.initialize(uri)
 			self.conn.simple_bind_s(bind_dn, bind_pw)
 			if not self.is_admin(bind_dn):
-				self.priv = 0
-			else:
-				self.priv = 1
+				return None
 		except Exception, e:
 			return None
 
-	def user_set_pwd(self, user, old_pwd, new_pwd):
-		# Change user's account using their own creds.
-		# This forces adherence to length/complexity/history.
-		print "hi"
-
-	def priv_set_pwd(self, user, new_pwd):
-		# Change the user's password using priv'd
-		# Make sure user exists
-		status = self.priv_get_user_status(user)
+	def user_set_pwd(self, user, current_pwd, new_pwd):
+		# Change user's account using their own creds
+		# This forces adherence to length/complexity/history
+		# They must exist, not be priv'd, and be able to authn
+		status = self.get_user_status(user)
 		if not status:
 			print "Could not load status for",user,"are you sure they are real?"
 			return None
 		user_dn = status['user_dn']
-		# Do not change an already priv'd user's password!
+		if self.is_admin(user_dn):
+			print user_dn,"is an admin! I'm not changing their password!"
+			return None
+		if not status['acct_can_authn']:
+			print user_dn,"cannot authn! They are one or more of disabled/locked/expired/pw expired!"
+		# The new password must respect policy
+		if not len(new_pwd) >= status['acct_pwd_policy']['pwd_length_min']:
+			print "Password must be longer than" , status['acct_pwd_policy']['pwd_length_min']
+			return None
+		patterns = [ r'.*(?P<digit>[0-9]).*', r'.*(?P<lowercase>[a-z]).*', r'.*(?P<uppercase>[A-Z]).*', r'.*(?P<special>[~!@#$%^&*_\-+=`|\\(){}\[\]:;"\'<>,.?/]).*']
+		matches = []
+		for pattern in patterns:
+			match = re.match(pattern, new_pwd)
+			if match and match.groupdict() and match.groupdict().keys():
+				matches.append(match.groupdict().keys()[0])
+		if status['acct_pwd_policy']['pwd_complexity_enforced'] and len(matches) < 3:
+			print 'You need 3 of 4 categories: digit, lowercase, uppercase, special and you only had',matches
+			return None
+		# Encode password and attempt change. If server is unwilling, history is likely fault.
+		bind_pw = current_pwd
+		current_pwd = unicode('\"' + current_pwd + '\"', "iso-8859-1").encode("utf-16-le")
+		new_pwd = unicode('\"' + new_pwd + '\"', "iso-8859-1").encode("utf-16-le")
+		pass_mod = [(ldap.MOD_DELETE, "unicodePwd", [current_pwd]), (ldap.MOD_ADD, "unicodePwd", [new_pwd])]
+		print pass_mod
+		try:
+			self.conn.modify_s(user_dn, pass_mod)
+		except Exception, e:
+			raise e
+		return 1
+
+	def set_pwd(self, user, new_pwd):
+		# Change the user's password using priv'd creds
+		# They must exist, not be priv'd
+		status = self.get_user_status(user)
+		if not status:
+			print "Could not load status for",user,"are you sure they are real?"
+			return None
+		user_dn = status['user_dn']
 		if self.is_admin(user_dn):
 			print user_dn,"is an admin! I'm not changing their password!"
 			return None
@@ -57,11 +88,11 @@ class activedirectory:
 			raise e
 		return 1
 
-	def priv_get_user_status(self, user):
+	def get_user_status(self, user):
 		user_base = "CN=Users," + self.base
 		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf']
-		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_auth':''}
-		if not self.conn or not self.priv:
+		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':''}
+		if not self.conn:
 			return None
 		# todo: sanitize user string
 		try:
@@ -109,10 +140,10 @@ class activedirectory:
 		s['acct_pwd_expired'] = 0
 		if datetime.datetime.fromtimestamp(s['acct_pwd_expiry']) < datetime.datetime.now() and s['acct_pwd_expiry_enabled']:
 			s['acct_pwd_expired'] = 1
-		s['acct_can_auth'] = (0 if s['acct_pwd_expired'] or s['acct_expired'] or s['acct_disabled'] or s['acct_locked'] else 1)
+		s['acct_can_authn'] = (0 if s['acct_pwd_expired'] or s['acct_expired'] or s['acct_disabled'] or s['acct_locked'] else 1)
 		return s
 
-	def priv_get_pw_policies(self):
+	def get_pw_policies(self):
 		default_policy_container = self.base
 		default_policy_attribs = ['maxPwdAge', 'minPwdLength', 'pwdHistoryLength', 'pwdProperties', 'lockoutThreshold', 'lockOutObservationWindow', 'lockoutDuration']
 		default_policy_map = {'maxPwdAge':'pwd_ttl', 'minPwdLength':'pwd_length_min', 'pwdHistoryLength':'pwd_history_depth', 'pwdProperties':'pwd_complexity_enforced', 'lockoutThreshold':'pwd_lockout_threshold', 'lockOutObservationWindow':'pwd_lockout_window', 'lockoutDuration':'pwd_lockout_ttl'}
@@ -120,7 +151,7 @@ class activedirectory:
 		granular_policy_filter = '(objectClass=msDS-PasswordSettings)'
 		granular_policy_attribs = ['msDS-LockoutDuration', 'msDS-LockoutObservationWindow', 'msDS-PasswordSettingsPrecedence', 'msDS-MaximumPasswordAge', 'msDS-PSOAppliesTo', 'msDS-LockoutThreshold', 'msDS-MinimumPasswordLength', 'msDS-PasswordComplexityEnabled', 'msDS-PasswordHistoryLength']
 		granular_policy_map = {'msDS-MaximumPasswordAge':'pwd_ttl', 'msDS-MinimumPasswordLength':'pwd_length_min', 'msDS-PasswordComplexityEnabled':'pwd_complexity_enforced', 'msDS-PasswordHistoryLength':'pwd_history_depth', 'msDS-LockoutThreshold':'pwd_lockout_threshold', 'msDS-LockoutObservationWindow':'pwd_lockout_window', 'msDS-LockoutDuration':'pwd_lockout_ttl','msDS-PasswordSettingsPrecedence':'pwd_policy_priority'}
-		if not self.conn or not self.priv:
+		if not self.conn:
 			return None
 		try:
 			# Load domain-wide policy.
@@ -171,14 +202,14 @@ class activedirectory:
 			raise e
 		return admin
 
-    # AD's date format is 100 nanosecond intervals since Jan 1 1601 in UTC.
+    # AD's date format is 100 nanosecond intervals since Jan 1 1601 in GMT.
     # To convert to seconds, divide by 10000000.
-    # To convert to UNIX, convert to positive seconds and add 11676009600 to be seconds since Jan 1 1970 (epoch).
+    # To convert to UNIX, convert to positive seconds and add 11644473600 to be seconds since Jan 1 1970 (epoch).
 	def ad_time_to_seconds(self, ad_time):
 		return -(int(ad_time) / 10000000)
 
 	def ad_seconds_to_unix(self, ad_seconds):
-		return ((int(ad_seconds) + 11676009600) if int(ad_seconds) != 0 else 0)
+		return  ((int(ad_seconds) + 11644473600) if int(ad_seconds) != 0 else 0)
 
 	def ad_time_to_unix(self, ad_time):
 		ad_seconds = self.ad_time_to_seconds(ad_time)
