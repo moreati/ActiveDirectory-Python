@@ -16,6 +16,7 @@ Expects:
   - Leaf users of groups in CN=Administrators,CN=Builtin,<your AD base> can:
     - Look up password policies (domain-wide and fine-grained)
     - Set any user's password
+  - To connect to one of your AD controllers via LDAP+SSL (generally port 636)
 
 Provides:
   - Function to use a user's own current credentials to bind to AD and
@@ -28,3 +29,13 @@ Provides:
     - Are they locked/disabled/expired/password expired
     - When account/password expires
     - When password was last set
+
+TODO:
+  - Better sanitization of user input
+  - Better exception handling/throwing
+  - Force SSL (can only change passwords over SSL)
+  - Clustered AD support (try next server in case of failure)
+  - Let AD do more calculation of things like: (wish I knew about these before I started)
+    - PSO applied (ms-DS-PSO-Applied)
+    - account locked, pw expired (ms-DS-User-Account-Control-Computed)
+    - Account lockout expiry (Lockout-Time)
