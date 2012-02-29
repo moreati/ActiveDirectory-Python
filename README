@@ -2,10 +2,29 @@ This is a python class for interacting with Active Directory via LDAP.
 
 It is intended to be used in a self-service password reset application.
 It focuses almost exclusively on password/account policy.
-It does support Server 2008r2's fine-grained password password policy:
 
+It does support Server 2008r2's fine-grained password password policy:
     http://technet.microsoft.com/en-us/library/cc754544(v=ws.10).aspx
 
-It is not production quality yet, and the code formatting is ugly.
+It is not production quality. You probably don't want to use it yet.
 
-You probably don't want to use it yet.
+Requirements:
+  - Python LDAP library
+
+Expects:
+  - Users can change their own password (SELF can Change Password in AD ACLs)
+  - Leaf users of groups in CN=Administrators,CN=Builtin,<your AD base> can:
+    - Look up password policies (domain-wide and fine-grained)
+    - Set any user's password
+
+Provides:
+  - Function to use a user's own current credentials to bind to AD and
+    change their password, which requires adherence to password policy.
+  - Function to use admin credentials to change a user's password which
+    mostly ignores password policy.
+  - Function to get all password policies for a domain.
+  - Function to load information about a user such as:
+    - Which password policy applies to them
+    - Are they locked/disabled/expired/password expired
+    - When account/password expires
+    - When password was last set
