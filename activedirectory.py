@@ -58,9 +58,14 @@ class activedirectory:
 		current_pwd = unicode('\"' + current_pwd + '\"', "iso-8859-1").encode("utf-16-le")
 		new_pwd = unicode('\"' + new_pwd + '\"', "iso-8859-1").encode("utf-16-le")
 		pass_mod = [(ldap.MOD_DELETE, "unicodePwd", [current_pwd]), (ldap.MOD_ADD, "unicodePwd", [new_pwd])]
-		print pass_mod
 		try:
-			self.conn.modify_s(user_dn, pass_mod)
+			user_conn = ldap.initialize(self.uri)
+			user_conn.simple_bind_s(user_dn, bind_pw)
+			user_conn.modify_s(user_dn, pass_mod)
+			user_conn.unbind_s()
+		except ldap.CONSTRAINT_VIOLATION:
+			print 'The server reported a constraint violation, which likely means you are trying to use one of your previous', status['acct_pwd_policy']['pwd_history_depth'], 'passwords'
+			return None
 		except Exception, e:
 			raise e
 		return 1
