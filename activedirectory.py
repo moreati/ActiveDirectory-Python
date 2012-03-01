@@ -23,6 +23,8 @@ class activedirectory:
 			self.conn.simple_bind_s(bind_dn, bind_pw)
 			if not self.is_admin(bind_dn):
 				return None
+		except ldap.INVALID_CREDENTIALS, e:
+			raise self.authn_failure(bind_dn, bind_pwd, uri)
 		except Exception, e:
 			return None
 
@@ -31,19 +33,15 @@ class activedirectory:
 		# This forces adherence to length/complexity/history
 		# They must exist, not be priv'd, and be able to authn
 		status = self.get_user_status(user)
-		if not status:
-			print "Could not load status for",user,"are you sure they are real?"
-			return None
 		user_dn = status['user_dn']
 		if self.is_admin(user_dn):
-			print user_dn,"is an admin! I'm not changing their password!"
-			return None
+			raise self.user_protected(user)
 		if not status['acct_can_authn']:
-			print user_dn,"cannot authn! They are one or more of disabled/locked/expired/pw expired!"
+			raise self.user_cannot_authn(user, status)
 		# The new password must respect policy
 		if not len(new_pwd) >= status['acct_pwd_policy']['pwd_length_min']:
-			print "Password must be longer than" , status['acct_pwd_policy']['pwd_length_min']
-			return None
+			msg = 'New password for %s must be at least %d characters, submitted password has only %d.' % (user, status['acct_pwd_policy']['pwd_length_min'], len(new_pwd))
+			raise self.pwd_vette_failure(user, new_pwd, msg, status)
 		patterns = [ r'.*(?P<digit>[0-9]).*', r'.*(?P<lowercase>[a-z]).*', r'.*(?P<uppercase>[A-Z]).*', r'.*(?P<special>[~!@#$%^&*_\-+=`|\\(){}\[\]:;"\'<>,.?/]).*']
 		matches = []
 		for pattern in patterns:
@@ -51,50 +49,48 @@ class activedirectory:
 			if match and match.groupdict() and match.groupdict().keys():
 				matches.append(match.groupdict().keys()[0])
 		if status['acct_pwd_policy']['pwd_complexity_enforced'] and len(matches) < 3:
-			print 'You need 3 of 4 categories: digit, lowercase, uppercase, special and you only had',matches
-			return None
+			msg = 'New password for %s must contain 3 of 4 character types (lowercase, uppercase, digit, special), only found %s.' % (user, (', ').join(matches))
+			raise self.pwd_vette_failure(user, new_pwd, msg, status)
 		# Encode password and attempt change. If server is unwilling, history is likely fault.
 		bind_pw = current_pwd
-		current_pwd = unicode('\"' + current_pwd + '\"', "iso-8859-1").encode("utf-16-le")
-		new_pwd = unicode('\"' + new_pwd + '\"', "iso-8859-1").encode("utf-16-le")
-		pass_mod = [(ldap.MOD_DELETE, "unicodePwd", [current_pwd]), (ldap.MOD_ADD, "unicodePwd", [new_pwd])]
+		current_pwd = unicode('\"' + current_pwd + '\"', 'iso-8859-1').encode('utf-16-le')
+		new_pwd = unicode('\"' + new_pwd + '\"', 'iso-8859-1').encode('utf-16-le')
+		pass_mod = [(ldap.MOD_DELETE, 'unicodePwd', [current_pwd]), (ldap.MOD_ADD, 'unicodePwd', [new_pwd])]
 		try:
 			user_conn = ldap.initialize(self.uri)
 			user_conn.simple_bind_s(user_dn, bind_pw)
 			user_conn.modify_s(user_dn, pass_mod)
 			user_conn.unbind_s()
+		except ldap.INVALID_CREDENTIALS, e:
+			raise self.authn_failure(user_dn, bind_pw, self.uri)
 		except ldap.CONSTRAINT_VIOLATION:
-			print 'The server reported a constraint violation, which likely means you are trying to use one of your previous', status['acct_pwd_policy']['pwd_history_depth'], 'passwords'
-			return None
+			msg = 'New password for %s must not match any of the past %d passwords.' % (user, status['acct_pwd_policy']['pwd_history_depth'])
+			raise self.pwd_vette_failure(user, new_pwd, msg, status)
 		except Exception, e:
 			raise e
-		return 1
 
 	def set_pwd(self, user, new_pwd):
 		# Change the user's password using priv'd creds
 		# They must exist, not be priv'd
 		status = self.get_user_status(user)
-		if not status:
-			print "Could not load status for",user,"are you sure they are real?"
-			return None
 		user_dn = status['user_dn']
 		if self.is_admin(user_dn):
-			print user_dn,"is an admin! I'm not changing their password!"
-			return None
+			raise self.user_protected(user)
 		# Even priv'd user must respect min password length.
 		if not len(new_pwd) >= status['acct_pwd_policy']['pwd_length_min']:
-			print "Password must be longer than" , status['acct_pwd_policy']['pwd_length_min']
-			return None
-		new_pwd = unicode('\"' + new_pwd + '\"', "iso-8859-1").encode("utf-16-le")
-		pass_mod = [((ldap.MOD_REPLACE, "unicodePwd", [new_pwd]))]
+			msg = 'New password for %s must be at least %d characters, submitted password has only %d.' % (user, status['acct_pwd_policy']['pwd_length_min'], len(new_pwd))
+			raise self.pwd_vette_failure(user, new_pwd, msg, status)
+		new_pwd = unicode('\"' + new_pwd + '\"', "iso-8859-1").encode('utf-16-le')
+		pass_mod = [((ldap.MOD_REPLACE, 'unicodePwd', [new_pwd]))]
 		try:
 			self.conn.modify_s(user_dn, pass_mod)
 		except Exception, e:
 			raise e
-		return 1
 
 	def get_user_status(self, user):
-		user_base = "CN=Users," + self.base
+		user_base = "CN=Users,%s" % (self.base)
+		user_filter = "(sAMAccountName=%s)" % (user)
+		user_scope = ldap.SCOPE_SUBTREE
 		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf']
 		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':''}
 		if not self.conn:
@@ -102,11 +98,11 @@ class activedirectory:
 		# todo: sanitize user string
 		try:
 			# Load attribs to determine if user could authn
-			results = self.conn.search_s(user_base, ldap.SCOPE_SUBTREE, "(sAMAccountName=" + user + ")", status_attribs)
+			results = self.conn.search_s(user_base, user_scope, user_filter, status_attribs)
 		except Exception, e:
 			raise e
 		if len(results) != 1: # sAMAccountName should be unique
-			return None
+			raise self.user_not_found(user)
 		result = results[0]
 		user_dn = result[0]
 		user_attribs = result[1]
@@ -152,7 +148,7 @@ class activedirectory:
 		default_policy_container = self.base
 		default_policy_attribs = ['maxPwdAge', 'minPwdLength', 'pwdHistoryLength', 'pwdProperties', 'lockoutThreshold', 'lockOutObservationWindow', 'lockoutDuration']
 		default_policy_map = {'maxPwdAge':'pwd_ttl', 'minPwdLength':'pwd_length_min', 'pwdHistoryLength':'pwd_history_depth', 'pwdProperties':'pwd_complexity_enforced', 'lockoutThreshold':'pwd_lockout_threshold', 'lockOutObservationWindow':'pwd_lockout_window', 'lockoutDuration':'pwd_lockout_ttl'}
-		granular_policy_container = 'CN=Password Settings Container,CN=System,' + self.base
+		granular_policy_container = 'CN=Password Settings Container,CN=System,%s' % (self.base)
 		granular_policy_filter = '(objectClass=msDS-PasswordSettings)'
 		granular_policy_attribs = ['msDS-LockoutDuration', 'msDS-LockoutObservationWindow', 'msDS-PasswordSettingsPrecedence', 'msDS-MaximumPasswordAge', 'msDS-PSOAppliesTo', 'msDS-LockoutThreshold', 'msDS-MinimumPasswordLength', 'msDS-PasswordComplexityEnabled', 'msDS-PasswordHistoryLength']
 		granular_policy_map = {'msDS-MaximumPasswordAge':'pwd_ttl', 'msDS-MinimumPasswordLength':'pwd_length_min', 'msDS-PasswordComplexityEnabled':'pwd_complexity_enforced', 'msDS-PasswordHistoryLength':'pwd_history_depth', 'msDS-LockoutThreshold':'pwd_lockout_threshold', 'msDS-LockoutObservationWindow':'pwd_lockout_window', 'msDS-LockoutDuration':'pwd_lockout_ttl','msDS-PasswordSettingsPrecedence':'pwd_policy_priority'}
@@ -194,17 +190,17 @@ class activedirectory:
 			return None
 		try:
 			results = self.conn.search_s(search_dn, ldap.SCOPE_BASE, '(memberOf=*)', ['memberOf'])
-			if not results:
-				return 0
-			if ("CN=Administrators,CN=Builtin,"+self.base).lower() in [g.lower() for g in results[0][1]['memberOf']]:
-				return 1
-			for group in results[0][1]['memberOf']:
-					admin |= self.is_admin(group)
-					# Break early once we detect admin
-					if admin:
-						return admin
 		except Exception, e:
 			raise e
+		if not results:
+			return 0
+		if ('CN=Administrators,CN=Builtin,'+self.base).lower() in [g.lower() for g in results[0][1]['memberOf']]:
+			return 1
+		for group in results[0][1]['memberOf']:
+				admin |= self.is_admin(group)
+				# Break early once we detect admin
+				if admin:
+					return admin
 		return admin
 
     # AD's date format is 100 nanosecond intervals since Jan 1 1601 in GMT.
@@ -219,3 +215,43 @@ class activedirectory:
 	def ad_time_to_unix(self, ad_time):
 		ad_seconds = self.ad_time_to_seconds(ad_time)
 		return -self.ad_seconds_to_unix(ad_seconds)
+
+	class user_not_found(Exception):
+		def __init__(self, user):
+			self.msg = 'Could not locate user %s.' % (user)
+		def __str__(self):
+			return repr(self.msg)
+
+	class user_protected(Exception):
+		def __init__(self, user):
+			self.msg = '%s is a protected user; their password cannot be changed using this tool.' % (user)
+		def __str__(self):
+			return repr(self.msg)
+
+	class user_cannot_authn(Exception):
+		def __init__(self, user, status):
+			self.status = status
+			self.msg = '%s cannot authn for the following reasons: ' % (user)
+			for test in ['acct_disabled', 'acct_locked', 'acct_expired', 'acct_pwd_expired']:
+				if status[test]:
+					self.msg += test + ' '
+		def __str__(self):
+			return repr(self.msg.rstrip() + '.')
+
+	class pwd_vette_failure(Exception):
+		def __init__(self, user, new_pwd, msg, status):
+			self.user = user
+			self.new_pwd = new_pwd
+			self.msg = msg
+			self.status = status
+		def __str__(self):
+			return repr(self.msg)
+
+	class authn_failure(Exception):
+		def __init__(self, user_dn, pwd, host):
+			self.user_dn = user_dn
+			self.pwd = pwd
+			self.host = host
+			self.msg = '%s failed to authn in a simple LDAP bind to %s' % (user_dn, host)
+		def __str__(self):
+			return repr(self.msg)
