@@ -10,23 +10,24 @@ class activedirectory:
 	domain_pw_policy = {}
 	granular_pw_policy = {} # keys are DNs policy applies to
 
-	def __init__(self, uri, base, bind_dn, bind_pw):
+	def __init__(self, host, base, bind_dn, bind_pw):
 		ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, 0)
 		ldap.set_option(ldap.OPT_REFERRALS, 0)
 		ldap.set_option(ldap.OPT_PROTOCOL_VERSION, 3)
 		self.conn = None
-		self.uri = uri
+		self.host = host
+		self.uri = "ldaps://%s" % (host)
 		self.base = base
 		self.bind_dn = bind_dn
 		try:
-			self.conn = ldap.initialize(uri)
+			self.conn = ldap.initialize(self.uri)
 			self.conn.simple_bind_s(bind_dn, bind_pw)
 			if not self.is_admin(bind_dn):
 				return None
 		except ldap.INVALID_CREDENTIALS, e:
-			raise self.authn_failure(bind_dn, bind_pwd, uri)
-		except Exception, e:
-			return None
+			raise self.authn_failure(bind_dn, bind_pwd, self.uri)
+		except ldap.LDAPError, e:
+			raise self.ldap_error(e[0]['desc'])
 
 	def user_set_pwd(self, user, current_pwd, new_pwd):
 		# Change user's account using their own creds
@@ -42,7 +43,7 @@ class activedirectory:
 		if not len(new_pwd) >= status['acct_pwd_policy']['pwd_length_min']:
 			msg = 'New password for %s must be at least %d characters, submitted password has only %d.' % (user, status['acct_pwd_policy']['pwd_length_min'], len(new_pwd))
 			raise self.pwd_vette_failure(user, new_pwd, msg, status)
-		patterns = [ r'.*(?P<digit>[0-9]).*', r'.*(?P<lowercase>[a-z]).*', r'.*(?P<uppercase>[A-Z]).*', r'.*(?P<special>[~!@#$%^&*_\-+=`|\\(){}\[\]:;"\'<>,.?/]).*']
+		patterns = [r'.*(?P<digit>[0-9]).*', r'.*(?P<lowercase>[a-z]).*', r'.*(?P<uppercase>[A-Z]).*', r'.*(?P<special>[~!@#$%^&*_\-+=`|\\(){}\[\]:;"\'<>,.?/]).*']
 		matches = []
 		for pattern in patterns:
 			match = re.match(pattern, new_pwd)
@@ -64,10 +65,12 @@ class activedirectory:
 		except ldap.INVALID_CREDENTIALS, e:
 			raise self.authn_failure(user_dn, bind_pw, self.uri)
 		except ldap.CONSTRAINT_VIOLATION:
+			# There may be some case in which a constraint violation is not history violation,
+			# but for now this is the best I can come up with.
 			msg = 'New password for %s must not match any of the past %d passwords.' % (user, status['acct_pwd_policy']['pwd_history_depth'])
 			raise self.pwd_vette_failure(user, new_pwd, msg, status)
-		except Exception, e:
-			raise e
+		except ldap.LDAPError, e:
+			raise self.ldap_error(e[0]['desc'])
 
 	def set_pwd(self, user, new_pwd):
 		# Change the user's password using priv'd creds
@@ -84,8 +87,8 @@ class activedirectory:
 		pass_mod = [((ldap.MOD_REPLACE, 'unicodePwd', [new_pwd]))]
 		try:
 			self.conn.modify_s(user_dn, pass_mod)
-		except Exception, e:
-			raise e
+		except ldap.LDAPError, e:
+			raise self.ldap_error(e[0]['desc'])
 
 	def get_user_status(self, user):
 		user_base = "CN=Users,%s" % (self.base)
@@ -93,14 +96,12 @@ class activedirectory:
 		user_scope = ldap.SCOPE_SUBTREE
 		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf']
 		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':''}
-		if not self.conn:
-			return None
 		# todo: sanitize user string
 		try:
 			# Load attribs to determine if user could authn
 			results = self.conn.search_s(user_base, user_scope, user_filter, status_attribs)
-		except Exception, e:
-			raise e
+		except ldap.LDAPError, e:
+			raise self.ldap_error(e[0]['desc'])
 		if len(results) != 1: # sAMAccountName should be unique
 			raise self.user_not_found(user)
 		result = results[0]
@@ -157,17 +158,17 @@ class activedirectory:
 		try:
 			# Load domain-wide policy.
 			results = self.conn.search_s(default_policy_container, ldap.SCOPE_BASE)
-			dpp = dict([(default_policy_map[k], results[0][1][k][0]) for k in default_policy_map.keys()])
-			dpp["pwd_policy_priority"] = 0 # 0 Indicates don't use it in priority calculations
-			self.domain_pw_policy = self.sanitize_pw_policy(dpp)
-			# Server 2008r2 only. Per-group policies in CN=Password Settings Container,CN=System
-			results = self.conn.search_s(granular_policy_container, ldap.SCOPE_ONELEVEL, granular_policy_filter, granular_policy_attribs)
-			for policy in results:
-				gpp = dict([(granular_policy_map[k], policy[1][k][0]) for k in granular_policy_map.keys()])
-				for target in policy[1]['msDS-PSOAppliesTo']:
-					self.granular_pw_policy[target] = self.sanitize_pw_policy(gpp)
-		except Exception, e:
-			raise e
+		except ldap.LDAPError, e:
+			raise self.ldap_error(e[0]['desc'])
+		dpp = dict([(default_policy_map[k], results[0][1][k][0]) for k in default_policy_map.keys()])
+		dpp["pwd_policy_priority"] = 0 # 0 Indicates don't use it in priority calculations
+		self.domain_pw_policy = self.sanitize_pw_policy(dpp)
+		# Server 2008r2 only. Per-group policies in CN=Password Settings Container,CN=System
+		results = self.conn.search_s(granular_policy_container, ldap.SCOPE_ONELEVEL, granular_policy_filter, granular_policy_attribs)
+		for policy in results:
+			gpp = dict([(granular_policy_map[k], policy[1][k][0]) for k in granular_policy_map.keys()])
+			for target in policy[1]['msDS-PSOAppliesTo']:
+				self.granular_pw_policy[target] = self.sanitize_pw_policy(gpp)
 
 	def sanitize_pw_policy(self, pw_policy):
 		valid_policy_entries = ['pwd_ttl', 'pwd_length_min', 'pwd_history_depth', 'pwd_complexity_enforced', 'pwd_lockout_threshold', 'pwd_lockout_window', 'pwd_lockout_ttl', 'pwd_policy_priority']
@@ -190,8 +191,8 @@ class activedirectory:
 			return None
 		try:
 			results = self.conn.search_s(search_dn, ldap.SCOPE_BASE, '(memberOf=*)', ['memberOf'])
-		except Exception, e:
-			raise e
+		except ldap.LDAPError, e:
+			raise self.ldap_error(e[0]['desc'])
 		if not results:
 			return 0
 		if ('CN=Administrators,CN=Builtin,'+self.base).lower() in [g.lower() for g in results[0][1]['memberOf']]:
@@ -253,5 +254,11 @@ class activedirectory:
 			self.pwd = pwd
 			self.host = host
 			self.msg = '%s failed to authn in a simple LDAP bind to %s' % (user_dn, host)
+		def __str__(self):
+			return repr(self.msg)
+
+	class ldap_error(Exception):
+		def __init__(self, msg):
+			self.msg = msg
 		def __str__(self):
 			return repr(self.msg)

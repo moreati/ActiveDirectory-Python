@@ -32,8 +32,8 @@ Provides:
 
 TODO:
   - Better sanitization of user input
-  - Better exception handling/throwing
-  - Force SSL (can only change passwords over SSL)
+  x Better exception handling/throwing
+  x Force SSL (can only change passwords over SSL)
   - Clustered AD support (try next server in case of failure)
   - Let AD do more calculation of things like: (wish I knew about these before I started)
     - PSO applied (ms-DS-PSO-Applied)
