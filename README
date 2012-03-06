@@ -35,7 +35,7 @@ TODO:
   x Better exception handling/throwing
   x Force SSL (can only change passwords over SSL)
   - Clustered AD support (try next server in case of failure)
-  - Let AD do more calculation of things like:
+  x Let AD do more calculation of things like:
     x Effective PSO (msDS-ResultantPSO) (Server 2008+)
     x Account locked, pw expired (msDS-User-Account-Control-Computed) (Server 2003+)
-    - Account lockout expiry (Lockout-Time) (Server 2000+)
+    x Account lockout expiry (Lockout-Time) (Server 2000+)
