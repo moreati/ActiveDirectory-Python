@@ -94,8 +94,8 @@ class activedirectory:
 		user_base = "CN=Users,%s" % (self.base)
 		user_filter = "(sAMAccountName=%s)" % (user)
 		user_scope = ldap.SCOPE_SUBTREE
-		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf', 'msDS-User-Account-Control-Computed', 'msDS-UserPasswordExpiryTimeComputed', 'msDS-ResultantPSO']
-		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':''}
+		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf', 'msDS-User-Account-Control-Computed', 'msDS-UserPasswordExpiryTimeComputed', 'msDS-ResultantPSO', 'lockoutTime']
+		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_locked_expiry':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':''}
 		# todo: sanitize user string
 		try:
 			# Load attribs to determine if user could authn
@@ -125,6 +125,9 @@ class activedirectory:
 			s['acct_pwd_policy'] = self.granular_pw_policy[user_attribs['msDS-ResultantPSO'][0]]
 		else:
 			s['acct_pwd_policy'] = self.domain_pw_policy
+		# If account is locked, expiry comes from lockoutTime + policy lockout ttl.
+		# lockoutTime is only reset to 0 on next successful login.
+		s['acct_locked_expiry'] = (self.ad_time_to_unix(user_attribs['lockoutTime'][0]) + s['acct_pwd_policy']['pwd_lockout_ttl'] if s['acct_locked'] else 0)
 		# msDS-UserPasswordExpiryTimeComputed is when a password expires. If never it is very high.
 		s['acct_pwd_expiry'] = self.ad_time_to_unix(user_attribs['msDS-UserPasswordExpiryTimeComputed'][0])
 		s['acct_pwd_expired'] = (1 if (uac_live & 0x00800000) else 0)
