@@ -8,7 +8,7 @@ import re
 class activedirectory:
 
 	domain_pw_policy = {}
-	granular_pw_policy = {} # keys are DNs policy applies to
+	granular_pw_policy = {} # keys are policy DNs
 
 	def __init__(self, host, base, bind_dn, bind_pw):
 		ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, 0)
@@ -94,7 +94,7 @@ class activedirectory:
 		user_base = "CN=Users,%s" % (self.base)
 		user_filter = "(sAMAccountName=%s)" % (user)
 		user_scope = ldap.SCOPE_SUBTREE
-		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf']
+		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf', 'msDS-User-Account-Control-Computed', 'msDS-UserPasswordExpiryTimeComputed', 'msDS-ResultantPSO']
 		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':''}
 		# todo: sanitize user string
 		try:
@@ -108,40 +108,26 @@ class activedirectory:
 		user_dn = result[0]
 		user_attribs = result[1]
 		uac = int(user_attribs['userAccountControl'][0])
+		uac_live = int(user_attribs['msDS-User-Account-Control-Computed'][0])
 		s = user_status
 		s['user_dn'] = user_dn
-		s['acct_locked'] = (1 if (uac & 0x00000010) else 0)
+		# uac_live (msDS-User-Account-Control-Computed) contains locked + pw_expired status live.
+		s['acct_locked'] = (1 if (uac_live & 0x00000010) else 0)
 		s['acct_disabled'] = (1 if (uac & 0x00000002) else 0)
 		s['acct_expiry'] = self.ad_time_to_unix(user_attribs['accountExpires'][0])
 		s['acct_expired'] = (0 if datetime.datetime.fromtimestamp(s['acct_expiry']) > datetime.datetime.now() or s['acct_expiry'] == 0 else 1)
 		s['acct_pwd_last_set'] = self.ad_time_to_unix(user_attribs['pwdLastSet'][0])
 		s['acct_pwd_expiry_enabled'] = (0 if (uac & 0x00010000) else 1)
-		# Even though there is a password expired flag in uac, it is not exposed to LDAP.
 		# For password expiration need to determine which policy, if any, applies to this user.
-		# PSO precedence:
-		# 1) applied directly to user
-		# 2) applied to group with lowest priority
-		# 3) domain default policy
-		if user_dn not in self.granular_pw_policy:
-			granular_candidates = []
-			for group in user_attribs['memberOf']:
-				if group in self.granular_pw_policy:
-					granular_candidates.append(self.granular_pw_policy[group])
-			if len(granular_candidates) > 0:
-				# Inefficient linear search here.
-				candidate = granular_candidates[0]
-				for c in granular_candidates[1:]:
-					if c['pwd_policy_priority'] < candidate['pwd_policy_priority']:
-						candidate = c
-				s['acct_pwd_policy'] = candidate
+		# msDS-ResultantPSO will be present in Server 2008+ and if the user has a PSO applied.
+		# If not present, use the domain default.
+		if 'msDS-ResultantPSO' in user_attribs:
+			s['acct_pwd_policy'] = self.granular_pw_policy[user_attribs['msDS-ResultantPSO'][0]]
 		else:
-			s['acct_pwd_policy'] = self.granular_pw_policy[user_dn]
-		if not s['acct_pwd_policy']:
 			s['acct_pwd_policy'] = self.domain_pw_policy
-		s['acct_pwd_expiry'] = s['acct_pwd_last_set'] + s['acct_pwd_policy']['pwd_ttl']
-		s['acct_pwd_expired'] = 0
-		if datetime.datetime.fromtimestamp(s['acct_pwd_expiry']) < datetime.datetime.now() and s['acct_pwd_expiry_enabled']:
-			s['acct_pwd_expired'] = 1
+		# msDS-UserPasswordExpiryTimeComputed is when a password expires. If never it is very high.
+		s['acct_pwd_expiry'] = self.ad_time_to_unix(user_attribs['msDS-UserPasswordExpiryTimeComputed'][0])
+		s['acct_pwd_expired'] = (1 if (uac_live & 0x00800000) else 0)
 		s['acct_can_authn'] = (0 if s['acct_pwd_expired'] or s['acct_expired'] or s['acct_disabled'] or s['acct_locked'] else 1)
 		return s
 
@@ -151,7 +137,7 @@ class activedirectory:
 		default_policy_map = {'maxPwdAge':'pwd_ttl', 'minPwdLength':'pwd_length_min', 'pwdHistoryLength':'pwd_history_depth', 'pwdProperties':'pwd_complexity_enforced', 'lockoutThreshold':'pwd_lockout_threshold', 'lockOutObservationWindow':'pwd_lockout_window', 'lockoutDuration':'pwd_lockout_ttl'}
 		granular_policy_container = 'CN=Password Settings Container,CN=System,%s' % (self.base)
 		granular_policy_filter = '(objectClass=msDS-PasswordSettings)'
-		granular_policy_attribs = ['msDS-LockoutDuration', 'msDS-LockoutObservationWindow', 'msDS-PasswordSettingsPrecedence', 'msDS-MaximumPasswordAge', 'msDS-PSOAppliesTo', 'msDS-LockoutThreshold', 'msDS-MinimumPasswordLength', 'msDS-PasswordComplexityEnabled', 'msDS-PasswordHistoryLength']
+		granular_policy_attribs = ['msDS-LockoutDuration', 'msDS-LockoutObservationWindow', 'msDS-PasswordSettingsPrecedence', 'msDS-MaximumPasswordAge', 'msDS-LockoutThreshold', 'msDS-MinimumPasswordLength', 'msDS-PasswordComplexityEnabled', 'msDS-PasswordHistoryLength']
 		granular_policy_map = {'msDS-MaximumPasswordAge':'pwd_ttl', 'msDS-MinimumPasswordLength':'pwd_length_min', 'msDS-PasswordComplexityEnabled':'pwd_complexity_enforced', 'msDS-PasswordHistoryLength':'pwd_history_depth', 'msDS-LockoutThreshold':'pwd_lockout_threshold', 'msDS-LockoutObservationWindow':'pwd_lockout_window', 'msDS-LockoutDuration':'pwd_lockout_ttl','msDS-PasswordSettingsPrecedence':'pwd_policy_priority'}
 		if not self.conn:
 			return None
@@ -167,8 +153,8 @@ class activedirectory:
 		results = self.conn.search_s(granular_policy_container, ldap.SCOPE_ONELEVEL, granular_policy_filter, granular_policy_attribs)
 		for policy in results:
 			gpp = dict([(granular_policy_map[k], policy[1][k][0]) for k in granular_policy_map.keys()])
-			for target in policy[1]['msDS-PSOAppliesTo']:
-				self.granular_pw_policy[target] = self.sanitize_pw_policy(gpp)
+			self.granular_pw_policy[policy[0]] = self.sanitize_pw_policy(gpp)
+			self.granular_pw_policy[policy[0]]['pwd_policy_dn'] = policy[0]
 
 	def sanitize_pw_policy(self, pw_policy):
 		valid_policy_entries = ['pwd_ttl', 'pwd_length_min', 'pwd_history_depth', 'pwd_complexity_enforced', 'pwd_lockout_threshold', 'pwd_lockout_window', 'pwd_lockout_ttl', 'pwd_policy_priority']
