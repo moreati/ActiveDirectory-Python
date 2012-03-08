@@ -19,9 +19,9 @@ Expects:
   - To connect to one of your AD controllers via LDAP+SSL (generally port 636)
 
 Provides:
-  - Function to use a user's own current credentials to bind to AD and
-    change their password, which requires adherence to password policy.
-  - Function to use admin credentials to change a user's password which
+  - Function to use admin credentials to bind to AD and
+    change a user's password, which requires adherence to password policy.
+  - Function to use admin credentials to set a user's password which
     mostly ignores password policy.
   - Function to get all password policies for a domain.
   - Function to load information about a user such as:
