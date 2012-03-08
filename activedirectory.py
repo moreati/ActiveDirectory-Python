@@ -7,6 +7,13 @@ import re
 
 class activedirectory:
 
+	# User configurable
+	# Which account states will you allow to change their own password?
+	# Any combination of:
+	# 	['acct_pwd_expired', 'acct_expired', 'acct_disabled', 'acct_locked']
+	can_change_pwd_states = ['acct_pwd_expired']
+
+	# Internal
 	domain_pw_policy = {}
 	granular_pw_policy = {} # keys are policy DNs
 
@@ -29,7 +36,7 @@ class activedirectory:
 		except ldap.LDAPError, e:
 			raise self.ldap_error(e[0]['desc'])
 
-	def user_set_pwd(self, user, current_pwd, new_pwd):
+	def change_pwd(self, user, current_pwd, new_pwd):
 		# Change user's account using their own creds
 		# This forces adherence to length/complexity/history
 		# They must exist, not be priv'd, and be able to authn
@@ -37,8 +44,8 @@ class activedirectory:
 		user_dn = status['user_dn']
 		if self.is_admin(user_dn):
 			raise self.user_protected(user)
-		if not status['acct_can_authn']:
-			raise self.user_cannot_authn(user, status)
+		if not status['acct_can_change_pwd']:
+			raise self.user_cannot_change_pwd(user, status, self.can_change_pwd_states)
 		# The new password must respect policy
 		if not len(new_pwd) >= status['acct_pwd_policy']['pwd_length_min']:
 			msg = 'New password for %s must be at least %d characters, submitted password has only %d.' % (user, status['acct_pwd_policy']['pwd_length_min'], len(new_pwd))
@@ -58,16 +65,16 @@ class activedirectory:
 		new_pwd = unicode('\"' + new_pwd + '\"', 'iso-8859-1').encode('utf-16-le')
 		pass_mod = [(ldap.MOD_DELETE, 'unicodePwd', [current_pwd]), (ldap.MOD_ADD, 'unicodePwd', [new_pwd])]
 		try:
-			user_conn = ldap.initialize(self.uri)
-			user_conn.simple_bind_s(user_dn, bind_pw)
-			user_conn.modify_s(user_dn, pass_mod)
-			user_conn.unbind_s()
-		except ldap.INVALID_CREDENTIALS, e:
-			raise self.authn_failure(user_dn, bind_pw, self.uri)
-		except ldap.CONSTRAINT_VIOLATION:
-			# There may be some case in which a constraint violation is not history violation,
-			# but for now this is the best I can come up with.
-			msg = 'New password for %s must not match any of the past %d passwords.' % (user, status['acct_pwd_policy']['pwd_history_depth'])
+			self.conn.modify_s(user_dn, pass_mod)
+		except ldap.CONSTRAINT_VIOLATION, e:
+			# If the exceptions's 'info' field begins with:
+			#  00000056 - Current passwords do not match
+			#  0000052D - New password violates length/complexity/history
+			msg = e[0]['desc']
+			if e[0]['info'].startswith('00000056'):
+				msg = 'Incorrect current password for %s.' % (user)
+			elif e[0]['info'].startswith('0000052D'):
+				msg = 'New password for %s must not match any of the past %d passwords.' % (user, status['acct_pwd_policy']['pwd_history_depth'])
 			raise self.pwd_vette_failure(user, new_pwd, msg, status)
 		except ldap.LDAPError, e:
 			raise self.ldap_error(e[0]['desc'])
@@ -95,7 +102,8 @@ class activedirectory:
 		user_filter = "(sAMAccountName=%s)" % (user)
 		user_scope = ldap.SCOPE_SUBTREE
 		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf', 'msDS-User-Account-Control-Computed', 'msDS-UserPasswordExpiryTimeComputed', 'msDS-ResultantPSO', 'lockoutTime']
-		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_locked_expiry':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':''}
+		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_locked_expiry':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':'', 'acct_can_change_pwd':'', 'acct_bad_states':[]}
+		bad_states = ['acct_locked', 'acct_disabled', 'acct_expired', 'acct_pwd_expired']
 		# todo: sanitize user string
 		try:
 			# Load attribs to determine if user could authn
@@ -131,7 +139,12 @@ class activedirectory:
 		# msDS-UserPasswordExpiryTimeComputed is when a password expires. If never it is very high.
 		s['acct_pwd_expiry'] = self.ad_time_to_unix(user_attribs['msDS-UserPasswordExpiryTimeComputed'][0])
 		s['acct_pwd_expired'] = (1 if (uac_live & 0x00800000) else 0)
-		s['acct_can_authn'] = (0 if s['acct_pwd_expired'] or s['acct_expired'] or s['acct_disabled'] or s['acct_locked'] else 1)
+		s['acct_can_authn'] = (0 if 1 in [s[k] for k in bad_states] else 1)
+		for state in bad_states:
+			if s[state]:
+				s['acct_bad_states'].append(state)
+		# If there is something in s['acct_bad_states'] not in self.can_change_pwd_states, they can't change pwd.
+		s['acct_can_change_pwd'] = (0 if (len(set(s['acct_bad_states']) - set(self.can_change_pwd_states)) != 0) else 1)
 		return s
 
 	def get_pw_policies(self):
@@ -218,13 +231,10 @@ class activedirectory:
 		def __str__(self):
 			return repr(self.msg)
 
-	class user_cannot_authn(Exception):
-		def __init__(self, user, status):
+	class user_cannot_change_pwd(Exception):
+		def __init__(self, user, status, can_change_pwd_states):
 			self.status = status
-			self.msg = '%s cannot authn for the following reasons: ' % (user)
-			for test in ['acct_disabled', 'acct_locked', 'acct_expired', 'acct_pwd_expired']:
-				if status[test]:
-					self.msg += test + ' '
+			self.msg = '%s cannot change password for the following reasons: %s' % (user, ', '.join((set(status['acct_bad_states']) - set(can_change_pwd_states))))
 		def __str__(self):
 			return repr(self.msg.rstrip() + '.')
 
