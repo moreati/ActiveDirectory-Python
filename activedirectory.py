@@ -21,6 +21,8 @@ class activedirectory:
 		ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, 0)
 		ldap.set_option(ldap.OPT_REFERRALS, 0)
 		ldap.set_option(ldap.OPT_PROTOCOL_VERSION, 3)
+		ldap.set_option(ldap.OPT_X_KEEPALIVE_IDLE, 1)
+		ldap.set_option(ldap.OPT_X_KEEPALIVE_INTERVAL, 30)
 		self.conn = None
 		self.host = host
 		self.uri = "ldaps://%s" % (host)
@@ -61,8 +63,8 @@ class activedirectory:
 			raise self.pwd_vette_failure(user, new_pwd, msg, status)
 		# Encode password and attempt change. If server is unwilling, history is likely fault.
 		bind_pw = current_pwd
-		current_pwd = unicode('\"' + current_pwd + '\"', 'iso-8859-1').encode('utf-16-le')
-		new_pwd = unicode('\"' + new_pwd + '\"', 'iso-8859-1').encode('utf-16-le')
+		current_pwd = unicode('\"' + current_pwd + '\"').encode('utf-16-le')
+		new_pwd = unicode('\"' + new_pwd + '\"').encode('utf-16-le')
 		pass_mod = [(ldap.MOD_DELETE, 'unicodePwd', [current_pwd]), (ldap.MOD_ADD, 'unicodePwd', [new_pwd])]
 		try:
 			self.conn.modify_s(user_dn, pass_mod)
