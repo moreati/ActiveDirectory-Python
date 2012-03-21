@@ -34,9 +34,23 @@ class activedirectory:
 			if not self.is_admin(bind_dn):
 				return None
 		except ldap.INVALID_CREDENTIALS, e:
-			raise self.authn_failure(bind_dn, bind_pwd, self.uri)
+			raise self.authn_failure(bind_dn, bind_pw, self.uri)
 		except ldap.LDAPError, e:
 			raise self.ldap_error(e[0]['desc'])
+
+	def user_authn(self, user, user_pwd):
+		# Look up DN for user, bind using current_pwd.
+		# Return true on success, exception on failure.
+		status = self.get_user_status(user)
+		bind_dn = status['user_dn']
+		try:
+			user_conn = ldap.initialize(self.uri)
+			user_conn.simple_bind_s(bind_dn, user_pwd)
+		except ldap.INVALID_CREDENTIALS, e:
+			raise self.authn_failure(bind_dn, user_pwd, self.uri)
+		except ldap.LDAPError, e:
+			raise self.ldap_error(e[0]['desc'])
+		return True
 
 	def change_pwd(self, user, current_pwd, new_pwd):
 		# Change user's account using their own creds
@@ -62,7 +76,6 @@ class activedirectory:
 			msg = 'New password for %s must contain 3 of 4 character types (lowercase, uppercase, digit, special), only found %s.' % (user, (', ').join(matches))
 			raise self.pwd_vette_failure(user, new_pwd, msg, status)
 		# Encode password and attempt change. If server is unwilling, history is likely fault.
-		bind_pw = current_pwd
 		current_pwd = unicode('\"' + current_pwd + '\"').encode('utf-16-le')
 		new_pwd = unicode('\"' + new_pwd + '\"').encode('utf-16-le')
 		pass_mod = [(ldap.MOD_DELETE, 'unicodePwd', [current_pwd]), (ldap.MOD_ADD, 'unicodePwd', [new_pwd])]
