@@ -21,8 +21,6 @@ class activedirectory:
 		ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, 0)
 		ldap.set_option(ldap.OPT_REFERRALS, 0)
 		ldap.set_option(ldap.OPT_PROTOCOL_VERSION, 3)
-		ldap.set_option(ldap.OPT_X_KEEPALIVE_IDLE, 1)
-		ldap.set_option(ldap.OPT_X_KEEPALIVE_INTERVAL, 30)
 		self.conn = None
 		self.host = host
 		self.uri = "ldaps://%s" % (host)
@@ -66,15 +64,26 @@ class activedirectory:
 		if not len(new_pwd) >= status['acct_pwd_policy']['pwd_length_min']:
 			msg = 'New password for %s must be at least %d characters, submitted password has only %d.' % (user, status['acct_pwd_policy']['pwd_length_min'], len(new_pwd))
 			raise self.pwd_vette_failure(user, new_pwd, msg, status)
-		patterns = [r'.*(?P<digit>[0-9]).*', r'.*(?P<lowercase>[a-z]).*', r'.*(?P<uppercase>[A-Z]).*', r'.*(?P<special>[~!@#$%^&*_\-+=`|\\(){}\[\]:;"\'<>,.?/]).*']
-		matches = []
-		for pattern in patterns:
-			match = re.match(pattern, new_pwd)
-			if match and match.groupdict() and match.groupdict().keys():
-				matches.append(match.groupdict().keys()[0])
-		if status['acct_pwd_policy']['pwd_complexity_enforced'] and len(matches) < 3:
-			msg = 'New password for %s must contain 3 of 4 character types (lowercase, uppercase, digit, special), only found %s.' % (user, (', ').join(matches))
-			raise self.pwd_vette_failure(user, new_pwd, msg, status)
+		# Check Complexity - 3of4 and username/displayname check
+		if status['acct_pwd_policy']['pwd_complexity_enforced']:
+			patterns = [r'.*(?P<digit>[0-9]).*', r'.*(?P<lowercase>[a-z]).*', r'.*(?P<uppercase>[A-Z]).*', r'.*(?P<special>[~!@#$%^&*_\-+=`|\\(){}\[\]:;"\'<>,.?/]).*']
+			matches = []
+			for pattern in patterns:
+				match = re.match(pattern, new_pwd)
+				if match and match.groupdict() and match.groupdict().keys():
+					matches.append(match.groupdict().keys()[0])
+			if len(matches) < 3:
+				msg = 'New password for %s must contain 3 of 4 character types (lowercase, uppercase, digit, special), only found %s.' % (user, (', ').join(matches))
+				raise self.pwd_vette_failure(user, new_pwd, msg, status)
+			# The new password must not contain user's username
+			if status['user_id'].lower() in new_pwd.lower():
+				msg = 'New password for %s must not contain their username.' % (user)
+				raise self.pwd_vette_failure(user, new_pwd, msg, status)
+			# The new password must not contain word from displayname
+			for e in status['user_displayname_tokenized']:
+				if len(e) > 2 and e.lower() in new_pwd.lower():
+					msg = 'New password for %s must not contain a word longer than 2 characters from your name in our system (%s), found %s.' % (user, (', ').join(status['user_displayname_tokenized']), e)
+					raise self.pwd_vette_failure(user, new_pwd, msg, status)
 		# Encode password and attempt change. If server is unwilling, history is likely fault.
 		current_pwd = unicode('\"' + current_pwd + '\"').encode('utf-16-le')
 		new_pwd = unicode('\"' + new_pwd + '\"').encode('utf-16-le')
@@ -112,12 +121,25 @@ class activedirectory:
 		except ldap.LDAPError, e:
 			raise self.ldap_error(e[0]['desc'])
 
+	def force_change_pwd(self, user):
+		# They must exist, not be priv'd
+		status = self.get_user_status(user)
+		user_dn = status['user_dn']
+		if self.is_admin(user_dn):
+			raise self.user_protected(user)
+		if status['acct_pwd_expiry_enabled']:
+			mod = [(ldap.MOD_REPLACE, 'pwdLastSet', [0])]
+			try:
+				self.conn.modify_s(user_dn, mod)
+			except ldap.LDAPError, e:
+				pass
+
 	def get_user_status(self, user):
 		user_base = "CN=Users,%s" % (self.base)
 		user_filter = "(sAMAccountName=%s)" % (user)
 		user_scope = ldap.SCOPE_SUBTREE
-		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf', 'msDS-User-Account-Control-Computed', 'msDS-UserPasswordExpiryTimeComputed', 'msDS-ResultantPSO', 'lockoutTime']
-		user_status = {'user_dn':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_locked_expiry':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':'', 'acct_can_change_pwd':'', 'acct_bad_states':[]}
+		status_attribs = ['pwdLastSet', 'accountExpires', 'userAccountControl', 'memberOf', 'msDS-User-Account-Control-Computed', 'msDS-UserPasswordExpiryTimeComputed', 'msDS-ResultantPSO', 'lockoutTime', 'sAMAccountName', 'displayName']
+		user_status = {'user_dn':'', 'user_id':'', 'user_displayname':'', 'acct_pwd_expiry_enabled':'', 'acct_pwd_expiry':'', 'acct_pwd_last_set':'', 'acct_pwd_expired':'', 'acct_pwd_policy':'', 'acct_disabled':'', 'acct_locked':'', 'acct_locked_expiry':'', 'acct_expired':'', 'acct_expiry':'', 'acct_can_authn':'', 'acct_can_change_pwd':'', 'acct_bad_states':[]}
 		bad_states = ['acct_locked', 'acct_disabled', 'acct_expired', 'acct_pwd_expired']
 		# todo: sanitize user string
 		try:
@@ -134,6 +156,10 @@ class activedirectory:
 		uac_live = int(user_attribs['msDS-User-Account-Control-Computed'][0])
 		s = user_status
 		s['user_dn'] = user_dn
+		s['user_id'] = user_attribs['sAMAccountName'][0]
+		s['user_displayname'] = user_attribs['displayName'][0]
+		# AD complexity will not allow a word longer than 2 characters as part of displayName
+		s['user_displayname_tokenized'] = [a for a in re.split('[,.\-_ #\t]+', s['user_displayname']) if len(a) > 2]
 		# uac_live (msDS-User-Account-Control-Computed) contains locked + pw_expired status live.
 		s['acct_locked'] = (1 if (uac_live & 0x00000010) else 0)
 		s['acct_disabled'] = (1 if (uac & 0x00000002) else 0)
@@ -231,6 +257,10 @@ class activedirectory:
 		return  ((int(ad_seconds) + 11644473600) if int(ad_seconds) != 0 else 0)
 
 	def ad_time_to_unix(self, ad_time):
+		#  A value of 0 or 0x7FFFFFFFFFFFFFFF (9223372036854775807) indicates that the account never expires.
+		# FIXME: Better handling of account-expires!
+		if ad_time == "9223372036854775807":
+			ad_time = "0"
 		ad_seconds = self.ad_time_to_seconds(ad_time)
 		return -self.ad_seconds_to_unix(ad_seconds)
 
@@ -238,20 +268,20 @@ class activedirectory:
 		def __init__(self, user):
 			self.msg = 'Could not locate user %s.' % (user)
 		def __str__(self):
-			return repr(self.msg)
+			return str(self.msg)
 
 	class user_protected(Exception):
 		def __init__(self, user):
 			self.msg = '%s is a protected user; their password cannot be changed using this tool.' % (user)
 		def __str__(self):
-			return repr(self.msg)
+			return str(self.msg)
 
 	class user_cannot_change_pwd(Exception):
 		def __init__(self, user, status, can_change_pwd_states):
 			self.status = status
 			self.msg = '%s cannot change password for the following reasons: %s' % (user, ', '.join((set(status['acct_bad_states']) - set(can_change_pwd_states))))
 		def __str__(self):
-			return repr(self.msg.rstrip() + '.')
+			return str(self.msg.rstrip() + '.')
 
 	class pwd_vette_failure(Exception):
 		def __init__(self, user, new_pwd, msg, status):
@@ -260,7 +290,7 @@ class activedirectory:
 			self.msg = msg
 			self.status = status
 		def __str__(self):
-			return repr(self.msg)
+			return str(self.msg)
 
 	class authn_failure(Exception):
 		def __init__(self, user_dn, pwd, host):
@@ -269,10 +299,10 @@ class activedirectory:
 			self.host = host
 			self.msg = '%s failed to authn in a simple LDAP bind to %s' % (user_dn, host)
 		def __str__(self):
-			return repr(self.msg)
+			return str(self.msg)
 
 	class ldap_error(Exception):
 		def __init__(self, msg):
 			self.msg = msg
 		def __str__(self):
-			return repr(self.msg)
+			return str(self.msg)
