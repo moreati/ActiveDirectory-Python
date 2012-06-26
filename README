@@ -6,7 +6,8 @@ It focuses almost exclusively on password/account policy.
 It does support Server 2008r2's fine-grained password password policy:
     http://technet.microsoft.com/en-us/library/cc754544(v=ws.10).aspx
 
-It is not production quality. You probably don't want to use it yet.
+SUNY Geneseo uses this in production for our self-service AD password reset
+app. It's not perfect, but it has been useful for us.
 
 Requirements:
   - Python LDAP library
@@ -23,6 +24,7 @@ Provides:
     change a user's password, which requires adherence to password policy.
   - Function to use admin credentials to set a user's password which
     mostly ignores password policy.
+  - Function to immediately expire a user's password.
   - Function to get all password policies for a domain.
   - Function to load information about a user such as:
     - Which password policy applies to them
