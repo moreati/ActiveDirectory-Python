@@ -3,11 +3,11 @@ This is a python class for interacting with Active Directory via LDAP.
 It is intended to be used in a self-service password reset application.
 It focuses almost exclusively on password/account policy.
 
-It does support Server 2008r2's fine-grained password password policy:
-    http://technet.microsoft.com/en-us/library/cc754544(v=ws.10).aspx
+It does support [Server 2008r2's fine-grained password password policy]
+(http://technet.microsoft.com/en-us/library/cc754544.aspx)
 
-SUNY Geneseo uses this in production for our self-service AD password reset
-app. It's not perfect, but it has been useful for us.
+SUNY Geneseo uses this in production for our self-service AD password reset app.
+It's not perfect, but it has been useful for us.
 
 Requirements:
   - Python LDAP library
@@ -34,10 +34,11 @@ Provides:
 
 TODO:
   - Better sanitization of user input
-  x Better exception handling/throwing
-  x Force SSL (can only change passwords over SSL)
+  - ~~Better exception handling/throwing~~
+  - ~~Force SSL (can only change passwords over SSL)~~
   - Clustered AD support (try next server in case of failure)
-  x Let AD do more calculation of things like:
-    x Effective PSO (msDS-ResultantPSO) (Server 2008+)
-    x Account locked, pw expired (msDS-User-Account-Control-Computed) (Server 2003+)
-    x Account lockout expiry (Lockout-Time) (Server 2000+)
+  - ~~Let AD do more calculation of things like:~~
+    - ~~Effective PSO (msDS-ResultantPSO) (Server 2008+)~~
+    - ~~Account locked, pw expired (msDS-User-Account-Control-Computed)
+      (Server 2003+)~~
+    - ~~Account lockout expiry (Lockout-Time) (Server 2000+)~~
